@@ -13,6 +13,7 @@ func TestCommit(t *testing.T) {
 	}
 
 	var a appendAction
+	a.a.flags = flagAppend
 	a.a.streamName = "s1"
 	a.a.offset = 0
 	a.data = []byte("Hello World")
@@ -54,6 +55,7 @@ func TestCommit(t *testing.T) {
 	}
 
 	var p pollardAction
+	p.a.flags = flagPollard
 	p.a.streamName = "s1"
 	p.a.offset = n2
 	p.pollardPos = 6
@@ -71,6 +73,31 @@ func TestCommit(t *testing.T) {
 
 	var data [12]byte
 	n, err = c.readStream("s1", 6, data[:])
+	if err != nil || len(data) != n {
+		t.Fatal(n, err)
+	}
+	if string(data[:]) != "World!Great!" {
+		t.Fatal(string(data[:]), "Wrong text")
+	}
+
+	if err = c.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c2 := newCommitLog()
+	if err = c2.read("test.log"); err != nil {
+		t.Fatal(err)
+	}
+
+	n1, n2, err = c2.streamRange("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n1 != 6 || n2 != 18 {
+		t.Fatal(n1, n2, "streamRange")
+	}
+
+	n, err = c2.readStream("s1", 6, data[:])
 	if err != nil || len(data) != n {
 		t.Fatal(n, err)
 	}

@@ -14,6 +14,9 @@ type actionFlags uint8
 const (
 	endOfRecord actionFlags = 1 << iota
 	actionWithName
+	flagMask    = 0xfc
+	flagAppend  = 4
+	flagPollard = 8
 )
 
 type streamLog struct {
@@ -75,7 +78,7 @@ type pollardAction struct {
 }
 
 type reader struct {
-	bufio.Reader
+	b     *bufio.Reader
 	names []string
 }
 
@@ -99,13 +102,64 @@ func (c *commitLog) create(filename string) error {
 }
 
 func (c *commitLog) read(fileName string) error {
+	f, err := os.OpenFile(fileName, os.O_RDWR, 0755)
+	if err != nil {
+		return err
+	}
 	// Check whether the dict has been written
 
+	size, err := f.Seek(0, os.SEEK_END)
+	if err != nil {
+		return err
+	}
+	_, err = f.Seek(0, os.SEEK_SET)
+	if err != nil {
+		return err
+	}
+	r := newReader(f)
 	// No dict written, recover as many actions as possible
+	for int64(c.size) < size {
+		a, err := r.peekAction()
+		if err != nil {
+			break
+		}
+		switch a & flagMask {
+		case flagAppend:
+			var a appendAction
+			err = a.read(r)
+			if err != nil {
+				break
+			}
+			n, err := a.recover(c)
+			if err != nil {
+				break
+			}
+			c.size += n
+		case flagPollard:
+			var a pollardAction
+			err = a.read(r)
+			if err != nil {
+				break
+			}
+			n, err := a.recover(c)
+			if err != nil {
+				break
+			}
+			c.size += n
+		default:
+			break
+		}
+	}
+	if int64(c.size) != size {
+		f.Truncate(int64(c.size))
+	}
 
-	// Truncate the log
+	c.w = newWriter(f)
+	return nil
+}
 
-	panic("TODO")
+func (c *commitLog) close() error {
+	return c.w.f.Close()
 }
 
 func (c *commitLog) commit(a actionIface) error {
@@ -172,17 +226,16 @@ func (c *commitLog) readStream(streamName string, offset uint64, data []byte) (n
 }
 
 func newReader(f io.Reader) *reader {
-	r := &reader{}
-	r.Reset(f)
+	r := &reader{b: bufio.NewReader(f)}
 	return r
 }
 
 func (r *reader) peekAction() (actionFlags, error) {
-	b, err := r.ReadByte()
+	b, err := r.b.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	err = r.UnreadByte()
+	err = r.b.UnreadByte()
 	if err != nil {
 		panic("Oooops")
 	}
@@ -248,15 +301,12 @@ func (a *action) write(c *commitLog) (n int, err error) {
 }
 
 func (a *action) recover(c *commitLog) (n int, err error) {
-	flags := a.flags
 	if _, ok := c.streams[a.streamName]; ok {
 		// Write flag and stream index
 		n += 3
 	} else {
 		index := uint16(len(c.streams))
 		c.streams[a.streamName] = streamLog{number: index, offset: a.offset, keepOffset: a.offset}
-		// Write flags anf offset
-		flags |= actionWithName
 		n += 9
 		// Write string, followed by a zero.
 		n += len(a.streamName) + 1
@@ -266,27 +316,27 @@ func (a *action) recover(c *commitLog) (n int, err error) {
 
 func (a *action) read(r *reader) error {
 	// Read flag byte
-	b, err := r.ReadByte()
+	b, err := r.b.ReadByte()
 	if err != nil {
 		return err
 	}
 	a.flags = actionFlags(b)
 	var buffer [8]byte
 	if (a.flags & actionWithName) == actionWithName {
-		_, err := io.ReadFull(r, buffer[:8])
+		_, err := io.ReadFull(r.b, buffer[:8])
 		if err != nil {
 			return err
 		}
 		a.offset = binary.LittleEndian.Uint64(buffer[:8])
-		str, err := r.ReadString(0)
+		str, err := r.b.ReadString(0)
 		if err != nil {
 			return err
 		}
 		// There is a 0 at the end of this string
 		a.streamName = str[:len(str)-1]
-		r.names = append(r.names, str)
+		r.names = append(r.names, a.streamName)
 	} else {
-		_, err := io.ReadFull(r, buffer[:2])
+		_, err := io.ReadFull(r.b, buffer[:2])
 		if err != nil {
 			return err
 		}
@@ -374,12 +424,12 @@ func (a *appendAction) read(r *reader) (err error) {
 		return
 	}
 	var buffer [8]byte
-	if _, err = io.ReadFull(r, buffer[:4]); err != nil {
+	if _, err = io.ReadFull(r.b, buffer[:4]); err != nil {
 		return
 	}
 	l := int(binary.LittleEndian.Uint32(buffer[:]))
 	a.data = make([]byte, l)
-	if _, err = io.ReadFull(r, a.data); err != nil {
+	if _, err = io.ReadFull(r.b, a.data); err != nil {
 		return
 	}
 	return
@@ -414,11 +464,11 @@ func (a *pollardAction) recover(c *commitLog) (n int, err error) {
 }
 
 func (a *pollardAction) read(r *reader) (err error) {
-	if err = a.read(r); err != nil {
+	if err = a.a.read(r); err != nil {
 		return
 	}
 	var buffer [8]byte
-	if _, err = io.ReadFull(r, buffer[:8]); err != nil {
+	if _, err = io.ReadFull(r.b, buffer[:8]); err != nil {
 		return
 	}
 	a.pollardPos = binary.LittleEndian.Uint64(buffer[:])
