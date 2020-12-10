@@ -85,7 +85,7 @@ func TestCommit(t *testing.T) {
 	}
 
 	c2 := newCommitLog()
-	if err = c2.read("test.log"); err != nil {
+	if err = c2.recover("test.log"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -103,5 +103,9 @@ func TestCommit(t *testing.T) {
 	}
 	if string(data[:]) != "World!Great!" {
 		t.Fatal(string(data[:]), "Wrong text")
+	}
+
+	if err = c2.finalize(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -2,11 +2,13 @@ package queue
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
 	"os"
+	"sort"
 )
 
 type actionFlags uint8
@@ -17,6 +19,7 @@ const (
 	flagMask    = 0xfc
 	flagAppend  = 4
 	flagPollard = 8
+	flagDict    = 12
 )
 
 type streamLog struct {
@@ -49,10 +52,11 @@ type commitLog struct {
 	// Maps stream names to an index.
 	// Stream names are indexed starting with 0 based on the order
 	// of the commits.
-	streams map[string]streamLog
-	w       *writer
-	size    int
-	fat     []fatEntry
+	streams   map[string]streamLog
+	w         *writer
+	size      int
+	fat       []fatEntry
+	finalized bool
 }
 
 type action struct {
@@ -87,6 +91,8 @@ type writer struct {
 	f *os.File
 }
 
+var errIsFinalized = errors.New("The commit log is finalized")
+
 func newCommitLog() *commitLog {
 	// TODO: Writer
 	return &commitLog{streams: make(map[string]streamLog)}
@@ -101,23 +107,22 @@ func (c *commitLog) create(filename string) error {
 	return nil
 }
 
-func (c *commitLog) read(fileName string) error {
+func (c *commitLog) recover(fileName string) error {
+	// Determine size of the file
+	fileInfo, err := os.Stat(fileName)
+	if err != nil {
+		return err
+	}
+	size := fileInfo.Size()
+
+	// Open the file for read/write
 	f, err := os.OpenFile(fileName, os.O_RDWR, 0755)
 	if err != nil {
 		return err
 	}
-	// Check whether the dict has been written
 
-	size, err := f.Seek(0, os.SEEK_END)
-	if err != nil {
-		return err
-	}
-	_, err = f.Seek(0, os.SEEK_SET)
-	if err != nil {
-		return err
-	}
 	r := newReader(f)
-	// No dict written, recover as many actions as possible
+	// Read all committed actions until end of file
 	for int64(c.size) < size {
 		a, err := r.peekAction()
 		if err != nil {
@@ -146,23 +151,36 @@ func (c *commitLog) read(fileName string) error {
 				break
 			}
 			c.size += n
+		case flagDict:
+			// TODO: Check that the dict is ok
+			c.finalized = true
+			return errIsFinalized
 		default:
 			break
 		}
 	}
+
+	// From here on we see garbage. Truncate here and continue
 	if int64(c.size) != size {
 		f.Truncate(int64(c.size))
 	}
 
+	// Append new actions using the writer
 	c.w = newWriter(f)
 	return nil
 }
 
 func (c *commitLog) close() error {
+	if c.finalized {
+		return errIsFinalized
+	}
 	return c.w.f.Close()
 }
 
 func (c *commitLog) commit(a actionIface) error {
+	if c.finalized {
+		return errIsFinalized
+	}
 	n, err := a.write(c)
 	if err != nil {
 		return err
@@ -172,8 +190,126 @@ func (c *commitLog) commit(a actionIface) error {
 	return nil
 }
 
-func (c *commitLog) writeDict() error {
-	panic("TODO")
+func (c *commitLog) finalize() error {
+	if c.finalized {
+		return errIsFinalized
+	}
+
+	// Sorted list of stream names
+	var names []string
+	for name := range c.streams {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// Write tree to buffer first and then persist it
+	buf := bytes.NewBuffer(nil)
+
+	// Write flag
+	buf.WriteByte(byte(flagDict))
+
+	// Write the tree
+	c.writeDictSubtree(buf, names)
+
+	// Persist the tree
+	if err := c.w.b.Flush(); err != nil {
+		return err
+	}
+	if _, err := c.w.b.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	if err := c.w.f.Sync(); err != nil {
+		return err
+	}
+
+	// Write size of dict and magic number
+	trailer := [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 42, 0, 42, 0xff, 42, 0xff}
+	binary.LittleEndian.PutUint32(trailer[:], uint32(len(names)))
+	if _, err := buf.Write(trailer[:]); err != nil {
+		return err
+	}
+
+	c.finalized = true
+	return c.w.f.Close()
+}
+
+func (c *commitLog) writeDictSubtree(buf *bytes.Buffer, names []string) (pos int, err error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+
+	middle := len(names) / 2
+	pos = buf.Len()
+	n := names[middle]
+	s := c.streams[n]
+	// Write positions of left and write subtree
+	var lrpos [8]byte
+	if _, err := buf.Write(lrpos[:]); err != nil {
+		return 0, err
+	}
+	// Write stream name
+	if _, err := buf.WriteString(n); err != nil {
+		return 0, err
+	}
+	if err := buf.WriteByte(0); err != nil {
+		return 0, err
+	}
+
+	// Write information about the stream
+	// Count fat entries
+	var fatCount uint16
+	fatIndex := s.firstFatIndex
+	for {
+		if c.fat[fatIndex].length > 0 {
+			fatCount++
+		}
+		if c.fat[fatIndex].next == 0 {
+			break
+		}
+		fatIndex = c.fat[fatIndex].next
+	}
+
+	// Write offset of first and last byte, and write number of fat entries
+	var fatBuf [18]byte
+	binary.LittleEndian.PutUint64(fatBuf[:8], s.keepOffset)
+	binary.LittleEndian.PutUint64(fatBuf[8:16], s.offset+uint64(s.length))
+	binary.LittleEndian.PutUint16(fatBuf[16:18], fatCount)
+	if _, err := buf.Write(fatBuf[:]); err != nil {
+		return 0, err
+	}
+
+	// Write fat entries
+	for {
+		if c.fat[fatIndex].length > 0 {
+			binary.LittleEndian.PutUint32(fatBuf[:4], uint32(c.fat[fatIndex].pos))
+			binary.LittleEndian.PutUint32(fatBuf[4:8], uint32(c.fat[fatIndex].length))
+			if _, err := buf.Write(fatBuf[:8]); err != nil {
+				return 0, err
+			}
+		}
+		if c.fat[fatIndex].next == 0 {
+			break
+		}
+		fatIndex = c.fat[fatIndex].next
+	}
+
+	// Write positions of left and write subtree
+	if middle > 0 {
+		left, err := c.writeDictSubtree(buf, names[:middle])
+		if err != nil {
+			return 0, nil
+		}
+		binary.LittleEndian.PutUint32(buf.Bytes()[pos:], uint32(left))
+	}
+	if middle+1 != len(names) {
+		right, err := c.writeDictSubtree(buf, names[middle+1:])
+		if err != nil {
+			return 0, nil
+		}
+		binary.LittleEndian.PutUint32(buf.Bytes()[pos+4:], uint32(right))
+	}
+
+	return pos, nil
 }
 
 // Returns the range of the stream that is stored in the log.
