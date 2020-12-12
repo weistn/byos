@@ -211,21 +211,21 @@ func (c *commitLog) finalize() error {
 	// Write the tree
 	c.writeDictSubtree(buf, names)
 
-	// Persist the tree
-	if err := c.w.b.Flush(); err != nil {
-		return err
-	}
-	if _, err := c.w.b.Write(buf.Bytes()); err != nil {
-		return err
-	}
-	if err := c.w.f.Sync(); err != nil {
+	// Write size of dict and magic number
+	trailer := [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 42, 0, 42, 0xff, 42, 0xff}
+	binary.LittleEndian.PutUint64(trailer[:], uint64(buf.Len()))
+	if _, err := buf.Write(trailer[:]); err != nil {
 		return err
 	}
 
-	// Write size of dict and magic number
-	trailer := [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 42, 0, 42, 0xff, 42, 0xff}
-	binary.LittleEndian.PutUint32(trailer[:], uint32(len(names)))
-	if _, err := buf.Write(trailer[:]); err != nil {
+	// Persist the tree
+	if _, err := c.w.b.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	if err := c.w.b.Flush(); err != nil {
+		return err
+	}
+	if err := c.w.f.Sync(); err != nil {
 		return err
 	}
 
@@ -259,9 +259,13 @@ func (c *commitLog) writeDictSubtree(buf *bytes.Buffer, names []string) (pos int
 	// Count fat entries
 	var fatCount uint16
 	fatIndex := s.firstFatIndex
+	foffset := s.offset
 	for {
 		if c.fat[fatIndex].length > 0 {
-			fatCount++
+			if foffset+uint64(c.fat[fatIndex].length) > s.keepOffset {
+				fatCount++
+			}
+			foffset += uint64(c.fat[fatIndex].length)
 		}
 		if c.fat[fatIndex].next == 0 {
 			break
@@ -279,13 +283,22 @@ func (c *commitLog) writeDictSubtree(buf *bytes.Buffer, names []string) (pos int
 	}
 
 	// Write fat entries
+	fatIndex = s.firstFatIndex
+	foffset = s.offset
 	for {
 		if c.fat[fatIndex].length > 0 {
-			binary.LittleEndian.PutUint32(fatBuf[:4], uint32(c.fat[fatIndex].pos))
-			binary.LittleEndian.PutUint32(fatBuf[4:8], uint32(c.fat[fatIndex].length))
-			if _, err := buf.Write(fatBuf[:8]); err != nil {
-				return 0, err
+			if foffset+uint64(c.fat[fatIndex].length) > s.keepOffset {
+				var skip uint32
+				if foffset < s.keepOffset {
+					skip = uint32(s.keepOffset - foffset)
+				}
+				binary.LittleEndian.PutUint32(fatBuf[:4], uint32(c.fat[fatIndex].pos)+skip)
+				binary.LittleEndian.PutUint32(fatBuf[4:8], uint32(c.fat[fatIndex].length)-skip)
+				if _, err := buf.Write(fatBuf[:8]); err != nil {
+					return 0, err
+				}
 			}
+			foffset += uint64(c.fat[fatIndex].length)
 		}
 		if c.fat[fatIndex].next == 0 {
 			break

@@ -108,4 +108,23 @@ func TestCommit(t *testing.T) {
 	if err = c2.finalize(); err != nil {
 		t.Fatal(err)
 	}
+
+	r := newLogReader()
+	if err := r.open("test.log"); err != nil {
+		t.Fatal(err)
+	}
+	e, err := r.search("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.firstOffset != 6 || e.lastOffset != 18 {
+		t.Fatal("Wrong range")
+	}
+	var data4 [6]byte
+	if err = r.read(e, 7, data4[:]); err != nil {
+		t.Fatal(err)
+	}
+	if string(data4[:]) != "orld!G" {
+		t.Fatal("Wrong data", string(data4[:]))
+	}
 }
