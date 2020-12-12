@@ -28,6 +28,22 @@ func TestCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	a.a.flags = flagAppend
+	a.a.streamName = "a1"
+	a.a.offset = 0
+	a.data = []byte("This is A")
+	if err := c.commit(&a); err != nil {
+		t.Fatal(err)
+	}
+
+	a.a.flags = flagAppend
+	a.a.streamName = "b1"
+	a.a.offset = 0
+	a.data = []byte("This is B")
+	if err := c.commit(&a); err != nil {
+		t.Fatal(err)
+	}
+
 	n1, n2, err := c.streamRange("s1")
 	if err != nil {
 		t.Fatal(err)
