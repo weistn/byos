@@ -3,11 +3,14 @@ package queue
 import (
 	"encoding/binary"
 	"os"
+
+	"github.com/weistn/byos/queue/util"
 )
 
 type logReader struct {
-	f    *os.File
-	dict []byte
+	filename string
+	f        *os.File
+	dict     []byte
 }
 
 type logReaderPiece struct {
@@ -16,17 +19,20 @@ type logReaderPiece struct {
 }
 
 type logReaderEntry struct {
-	firstOffset uint64
-	lastOffset  uint64
-	pieces      []logReaderPiece
+	span   util.Span
+	pieces []logReaderPiece
 }
 
-func newLogReader() *logReader {
-	return &logReader{}
+func newLogReader(filename string) *logReader {
+	return &logReader{filename: filename}
 }
 
-func (l *logReader) open(filename string) error {
-	f, err := os.Open(filename)
+func (l *logReader) isOpen() bool {
+	return l.f != nil
+}
+
+func (l *logReader) open() error {
+	f, err := os.Open(l.filename)
 	if err != nil {
 		return err
 	}
@@ -59,12 +65,23 @@ func (l *logReader) open(filename string) error {
 	return nil
 }
 
+func (l *logReader) close() error {
+	if l.f == nil {
+		return nil
+	}
+	err := l.f.Close()
+	l.f = nil
+	return err
+}
+
+// Returns an error if not all requested data could be read, either because of
+// an error or because the desired data does not exist (at least partially).
 func (l *logReader) read(e logReaderEntry, offset uint64, data []byte) (err error) {
-	if offset < e.firstOffset || offset+uint64(len(data)) > e.lastOffset {
+	if offset < e.span.From || offset+uint64(len(data)) > e.span.To {
 		return os.ErrInvalid
 	}
 	piece := 0
-	eoffset := e.firstOffset
+	eoffset := e.span.From
 	for ; offset >= eoffset+uint64(e.pieces[piece].length); piece++ {
 		eoffset += uint64(e.pieces[piece].length)
 	}
@@ -119,8 +136,8 @@ func (l *logReader) search(streamName string) (logReaderEntry, error) {
 	}
 
 	var e logReaderEntry
-	e.firstOffset = binary.LittleEndian.Uint64(l.dict[pos:])
-	e.lastOffset = binary.LittleEndian.Uint64(l.dict[pos+8:])
+	e.span.From = binary.LittleEndian.Uint64(l.dict[pos:])
+	e.span.To = binary.LittleEndian.Uint64(l.dict[pos+8:])
 	count := binary.LittleEndian.Uint16(l.dict[pos+16:])
 	pos += 8 + 8 + 2
 

@@ -44,12 +44,12 @@ func TestCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n1, n2, err := c.streamRange("s1")
+	span, err := c.streamRange("s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n1 != 0 || n2 != 18 {
-		t.Fatal(n1, n2, "streamRange")
+	if span.From != 0 || span.To != 18 {
+		t.Fatal("streamRange")
 	}
 
 	var data2 [18]byte
@@ -73,18 +73,18 @@ func TestCommit(t *testing.T) {
 	var p pollardAction
 	p.a.flags = flagPollard
 	p.a.streamName = "s1"
-	p.a.offset = n2
+	p.a.offset = span.To
 	p.pollardPos = 6
 	if err := c.commit(&p); err != nil {
 		t.Fatal(err)
 	}
 
-	n1, n2, err = c.streamRange("s1")
+	span, err = c.streamRange("s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n1 != 6 || n2 != 18 {
-		t.Fatal(n1, n2, "streamRange")
+	if span.From != 6 || span.To != 18 {
+		t.Fatal("streamRange")
 	}
 
 	var data [12]byte
@@ -105,12 +105,12 @@ func TestCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n1, n2, err = c2.streamRange("s1")
+	span, err = c2.streamRange("s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n1 != 6 || n2 != 18 {
-		t.Fatal(n1, n2, "streamRange")
+	if span.From != 6 || span.To != 18 {
+		t.Fatal("streamRange")
 	}
 
 	n, err = c2.readStream("s1", 6, data[:])
@@ -125,15 +125,15 @@ func TestCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := newLogReader()
-	if err := r.open("test.log"); err != nil {
+	r := newLogReader("test.log")
+	if err := r.open(); err != nil {
 		t.Fatal(err)
 	}
 	e, err := r.search("s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.firstOffset != 6 || e.lastOffset != 18 {
+	if e.span.From != 6 || e.span.To != 18 {
 		t.Fatal("Wrong range")
 	}
 	var data4 [6]byte

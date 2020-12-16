@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"github.com/weistn/byos/queue/util"
 )
 
 type actionFlags uint8
@@ -327,12 +329,12 @@ func (c *commitLog) writeDictSubtree(buf *bytes.Buffer, names []string) (pos int
 
 // Returns the range of the stream that is stored in the log.
 // Returns an error if the stream is not in the log.
-func (c *commitLog) streamRange(streamName string) (first uint64, last uint64, err error) {
+func (c *commitLog) streamRange(streamName string) (span util.Span, err error) {
 	s, ok := c.streams[streamName]
 	if !ok {
-		return 0, 0, os.ErrNotExist
+		return util.Span{}, os.ErrNotExist
 	}
-	return s.keepOffset, s.offset + uint64(s.length), nil
+	return util.Span{From: s.keepOffset, To: s.offset + uint64(s.length)}, nil
 }
 
 func (c *commitLog) readStream(streamName string, offset uint64, data []byte) (n int, err error) {
