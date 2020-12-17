@@ -156,6 +156,7 @@ func (f *Frontend) Read(streamName string, offset uint64, data []byte) (n uint64
 			// Some of the desired data does not exist? -> shrink data
 			if logspan.To < dataspan.To {
 				data = data[:int(logspan.To-dataspan.From)]
+				dataspan.To = logspan.To
 			}
 			// Parts of the desired data is in the commit log ?
 			_, err = f.log.readStream(streamName, take.From, data[dataspan.Size()-take.Size():])
@@ -188,6 +189,7 @@ func (f *Frontend) Read(streamName string, offset uint64, data []byte) (n uint64
 				// Some of the desired data does not exist? -> shring data
 				if n == 0 && logspan.To < dataspan.To {
 					data = data[:int(logspan.To-dataspan.From)]
+					dataspan.To = logspan.To
 				}
 				// Parts of the desired data is in the commit log ?
 				err = r.read(logentry, take.From, data[dataspan.Size()-take.Size()-n:dataspan.Size()-n])
@@ -211,12 +213,13 @@ func (f *Frontend) Read(streamName string, offset uint64, data []byte) (n uint64
 
 // Append writes data to a stream and syncs it to disk when required.
 func (f *Frontend) Append(streamName string, data []byte, commit bool) error {
+	// TODO: commit
 	var a appendAction
 	a.a.flags = flagAppend
 	a.a.streamName = streamName
 	a.a.offset = 0
 	stat, err := f.Stat(streamName)
-	if err != nil && err != os.ErrPermission {
+	if err != nil && err != os.ErrNotExist {
 		return err
 	} else if err == nil {
 		a.a.offset = stat.Size
